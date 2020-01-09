@@ -1,264 +1,67 @@
 extern crate proc_macro;
 
 use proc_macro::TokenStream;
-// use proc_macro2::{Ident, Span};
-use quote::{quote, format_ident};
-use syn::{
-    Attribute,
-    parse_macro_input,
-    DeriveInput,
-    Data,
-    Fields,
-    Field,
-    Lit,
-    Ident,
-    Meta,
-    NestedMeta,
-    Path,
-    PathArguments,
-    GenericArgument,
-    Type,
-};
-
-#[derive(Debug)]
-struct BuilderData<'ast> {
-    ident: &'ast Option<Ident>,
-    ty: &'ast Type,
-    is_optional: bool,
-    attributes: Vec<BuilderAttribute>,
-}
-
-#[derive(Debug)]
-enum BuilderAttribute {
-    Each(String),
-}
+use quote::quote;
+use syn::{DeriveInput, Ident, parse_macro_input, export::Span, Data, Fields, FieldsNamed};
 
 #[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
+	let ast = parse_macro_input!(input as DeriveInput);
+	let vis = &ast.vis;
+	let id = &ast.ident;
+	let builder_id = Ident::new(&format!("{}Builder", id), Span::call_site());
 
-    let name = input.ident;
+	let (builder_init, builder_fields) = match ast.data {
+		Data::Struct(s)=> {
+			match s.fields {
+				Fields::Named(f) => {
+					let builder_init = create_builder_init(&f);
+					let builder_fields = create_builder_fields(&f);
+					(builder_init, builder_fields)
+				},
+				_ => unimplemented!()
+			}
+		},
+		_ => unimplemented!(),
+	};
 
-    let builder_name = format_ident!("{}Builder", name);
+	let tokens = quote!{
+		#vis struct #builder_id {
+			#builder_fields
+		}
 
-    let mut data = vec![];
+		impl #id {
+			#vis fn builder() -> #builder_id {
+				#builder_id {
+					#builder_init
+				}
+			}
+		}
+	};
 
-    match input.data {
-        Data::Struct(ref obj) => {
-            match obj.fields {
-                Fields::Named(ref fields) => {
-                    for field in &fields.named {
-                        data.push(get_builder_data(&field));
-                    }
-                }
-                _ => unimplemented!(),
-            }
-        },
-        Data::Enum(_) => unimplemented!(),
-        Data::Union(_) => unimplemented!()
-    };
-
-    let definition = builder_def(&data, &builder_name);
-    let constructor = builder_constructor(&data, &builder_name);
-    let methods = impl_builder(&data, &builder_name, &name);
-
-    let expanded = quote! {
-        #definition
-
-        impl #name {
-            #constructor
-        }
-
-        #methods
-    };
-
-    TokenStream::from(expanded)
+	tokens.into()	
 }
 
-fn get_builder_data(field: &Field) -> BuilderData {
-    let mut is_optional = false;
+fn create_builder_fields(fields: &FieldsNamed) -> proc_macro2::TokenStream {
+	let builder_fields = fields.named.iter().map(|f| {
+		let id = &f.ident;
+		let ty = &f.ty;
 
-    if let Type::Path(path) = &field.ty {
-        for seg in &path.path.segments {
-            if seg.ident == "Option"{
-                is_optional = true;
-            }
-        }
-    }
+		quote!{
+			#id: ::std::option::Option<#ty>
+		}
+	});
 
-    let mut attributes = vec![];
-    if !field.attrs.is_empty() {
-        for attr in &field.attrs {
-            attributes.append(&mut parse_builder_attr(attr));
-        }
-    }
-
-    BuilderData {
-        ident: &field.ident,
-        ty: &field.ty,
-        is_optional,
-        attributes,
-    }
+	quote!{ #(#builder_fields),* }
 }
 
-fn parse_builder_attr(attr: &Attribute) -> Vec<BuilderAttribute> {
-    let meta = match attr.parse_meta() {
-        Ok(m) => m,
-        Err(e) => panic!(e),
-    };
-
-    let mut attrs = vec![];
-    match meta {
-        Meta::List(ml) => {
-            if is_builder_attr(&ml.path) {
-                for nested in ml.nested {
-                    attrs.append(&mut nested_builder_attr(&nested));
-                }
-            }
-        }
-        _ => (),
-    };
-
-    attrs
-}
-
-fn nested_builder_attr(nm: &NestedMeta) -> Vec<BuilderAttribute> {
-    let mut attrs = vec![];
-
-    match nm {
-        NestedMeta::Meta(meta) => {
-            match meta {
-                Meta::Path(_) => unimplemented!(),
-                Meta::List(ml) => {
-                    // deal with path somehow
-                    for nested in &ml.nested {
-                        attrs.append(&mut nested_builder_attr(&nested));
-                    }
-                },
-                Meta::NameValue(mnv) => {
-                    // Doesnt make sense for a named value to have multiple paths
-                    if mnv.path.segments[0].ident == "each" {
-                         if let Lit::Str(val) = &mnv.lit {
-                            attrs.push(BuilderAttribute::Each(val.value()));
-                         }
-                    } else { unimplemented!(); }
-                }
-            }
-        },
-        NestedMeta::Lit(_) => unimplemented!(),
-    };
-
-    attrs
-}
-
-fn is_builder_attr(path: &Path) -> bool {
-    let mut is_builder = false;
-
-    for seg in &path.segments {
-        if seg.ident == "builder" {
-            is_builder = true;
-        }
-    }
-
-    is_builder
-}
-
-
-fn builder_def(data: &Vec<BuilderData>, builder_name: &Ident) -> proc_macro2::TokenStream {
-    let properties = data.iter().map(|d| builder_properties(d));
-
-    quote!{
-        pub struct #builder_name {
-            #(#properties),* //
-        }
-    }
-}
-
-fn builder_properties(data: &BuilderData) -> proc_macro2::TokenStream {
-    let ty = data.ty;
-    let name = data.ident;
-    let newty = if data.is_optional {
-        quote!{#ty}
-    } else {
-        quote!{Option<#ty>}
-    };
-
-    quote!{#name: #newty}
-}
-
-fn builder_constructor(data: &Vec<BuilderData>, builder_name: &Ident) -> proc_macro2::TokenStream {
-    let names = data.iter().map(|d| &d.ident);
-
-    quote!{
-        pub fn builder() -> #builder_name {
-            #builder_name {
-                #(#names: None),*
-            }
-        }
-    }
-}
-
-fn impl_builder(data: &Vec<BuilderData>, builder_name: &Ident, name: &Ident) -> proc_macro2::TokenStream {
-    let methods = data.iter().map(|d| builder_method(d));
-    let build = builder_build(data, name);
-    quote!{
-        impl #builder_name {
-            #(#methods)*
-            #build
-        }
-    }
-}
-
-fn builder_method(data: &BuilderData) -> proc_macro2::TokenStream {
-    let name = data.ident;
-
-    let ty = if data.is_optional {
-        if let Type::Path(path) = data.ty {
-            if let PathArguments::AngleBracketed(arg) = &path.path.segments[0].arguments {
-                if let GenericArgument::Type(typ) = &arg.args[0] {
-                    typ
-                } else {unimplemented!();}
-            } else {unimplemented!();}
-        } else {unimplemented!();}
-    } else {
-        data.ty
-    };
-
-    quote!{
-        pub fn #name(&mut self, #name: #ty) -> &mut Self {
-            self.#name = Some(#name);
-            self
-        }
-    }
-}
-
-fn builder_build(data: &Vec<BuilderData>, name: &Ident) -> proc_macro2::TokenStream {
-    let extraction = data.iter().map(|d| builder_build_verification(d));
-    let names = data.iter().map(|d| &d.ident);
-
-    quote!{
-        pub fn build(&mut self) -> Result<#name, Box<dyn std::error::Error>> {
-            #(#extraction)*
-
-            Ok(#name {
-                #(#names),*
-            })
-        }
-    }
-}
-
-fn builder_build_verification(data: &BuilderData) -> proc_macro2::TokenStream {
-    let name = data.ident;
-
-    let message = if let Some(name) = data.ident {
-        name.to_string() + " has not been added"
-    } else {
-        "".into()
-    };
-
-    if data.is_optional {
-        quote!{let #name = self.#name.to_owned();}
-    } else {
-        quote!{let #name = if let Some(field) = &self.#name {field.to_owned()} else {return Err(#message.into())};}
-    }
+fn create_builder_init(fields: &FieldsNamed) -> proc_macro2::TokenStream {
+	let builder_inits = fields.named.iter().map(|f| {
+		let id = &f.ident;
+		
+		quote!{
+			#id: None
+		}
+	});
+	quote!{ #(#builder_inits),*}
 }
