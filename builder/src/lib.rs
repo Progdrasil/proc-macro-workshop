@@ -11,13 +11,15 @@ pub fn derive(input: TokenStream) -> TokenStream {
 	let id = &ast.ident;
 	let builder_id = Ident::new(&format!("{}Builder", id), Span::call_site());
 
-	let (builder_init, builder_fields) = match ast.data {
+	let (builder_init, builder_fields, builder_setters) = match ast.data {
 		Data::Struct(s)=> {
 			match s.fields {
 				Fields::Named(f) => {
-					let builder_init = create_builder_init(&f);
-					let builder_fields = create_builder_fields(&f);
-					(builder_init, builder_fields)
+					(
+						create_builder_init(&f), 
+						create_builder_fields(&f),
+						create_builder_setters(&f)
+					)
 				},
 				_ => unimplemented!()
 			}
@@ -37,13 +39,17 @@ pub fn derive(input: TokenStream) -> TokenStream {
 				}
 			}
 		}
+
+		impl #builder_id {
+			#builder_setters
+		}
 	};
 
 	tokens.into()	
 }
 
 fn create_builder_fields(fields: &FieldsNamed) -> proc_macro2::TokenStream {
-	let builder_fields = fields.named.iter().map(|f| {
+	let fds = fields.named.iter().map(|f| {
 		let id = &f.ident;
 		let ty = &f.ty;
 
@@ -52,16 +58,31 @@ fn create_builder_fields(fields: &FieldsNamed) -> proc_macro2::TokenStream {
 		}
 	});
 
-	quote!{ #(#builder_fields),* }
+	quote!{ #(#fds),* }
 }
 
 fn create_builder_init(fields: &FieldsNamed) -> proc_macro2::TokenStream {
-	let builder_inits = fields.named.iter().map(|f| {
+	let inits = fields.named.iter().map(|f| {
 		let id = &f.ident;
 		
 		quote!{
-			#id: None
+			#id: ::std::option::Option::None
 		}
 	});
-	quote!{ #(#builder_inits),*}
+	quote!{ #(#inits),*}
+}
+
+fn create_builder_setters(fields: &FieldsNamed) -> proc_macro2::TokenStream {
+	let setters = fields.named.iter().map(|f| {
+		let id = &f.ident;
+		let ty = &f.ty;
+
+		quote!{
+			fn #id(&mut self, #id: #ty) -> &mut Self {
+				self.#id = ::std::option::Option::Some(#id);
+				self
+			}
+		}
+	});
+	quote!{ #(#setters)* }
 }
