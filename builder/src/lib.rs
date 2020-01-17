@@ -11,14 +11,15 @@ pub fn derive(input: TokenStream) -> TokenStream {
 	let id = &ast.ident;
 	let builder_id = Ident::new(&format!("{}Builder", id), Span::call_site());
 
-	let (builder_init, builder_fields, builder_setters) = match ast.data {
+	let (builder_init, builder_fields, builder_setters, builder_build) = match ast.data {
 		Data::Struct(s)=> {
 			match s.fields {
 				Fields::Named(f) => {
 					(
-						create_builder_init(&f), 
+						create_builder_init(&f),
 						create_builder_fields(&f),
-						create_builder_setters(&f)
+						create_builder_setters(&f),
+						create_builder_build(&id, &f),
 					)
 				},
 				_ => unimplemented!()
@@ -42,6 +43,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
 		impl #builder_id {
 			#builder_setters
+
+			#builder_build
 		}
 	};
 
@@ -85,4 +88,36 @@ fn create_builder_setters(fields: &FieldsNamed) -> proc_macro2::TokenStream {
 		}
 	});
 	quote!{ #(#setters)* }
+}
+
+fn create_builder_build(struct_ident: &Ident, fields:&FieldsNamed) -> proc_macro2::TokenStream {
+	let requirement_check = fields.named.iter().map(|f| {
+		let id = &f.ident;
+		let struct_ident_str = struct_ident.to_string();
+		// let id_str = id.to_string();
+		
+		quote!{
+			if self.#id.is_none() {
+				return ::std::result::Result::Err(::std::boxed::Box::from(format!("{} Value not set for field: {:#?}", #struct_ident_str, self.#id)))
+			}
+		}
+	});
+
+	let field_acquisition = fields.named.iter().map(|f| {
+		let id = &f.ident;
+
+		quote!{
+			#id: self.#id.take().unwrap()
+		}
+	});
+
+	quote!(
+		fn build(&mut self) -> ::std::result::Result<#struct_ident, ::std::boxed::Box<dyn ::std::error::Error>> {
+			#(#requirement_check)*
+
+			::std::result::Result::Ok(#struct_ident {
+				#(#field_acquisition),*
+			})
+		}
+	)
 }
